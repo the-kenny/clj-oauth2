@@ -130,24 +130,27 @@
       (throw (OAuth2Exception. (str "Unknown token type: " token-type)))
       [req false])))
 
-(defmacro defaddtoken
-  [token-type-dispatch auth-key]
-  `(defmethod add-access-token-to-request
-     ~token-type-dispatch [req# oauth2#]
-     (let [access-token# (:access-token oauth2#)
-           query-param#  (:query-param oauth2#)]
-       (if access-token#
-         [(if query-param#
-            (assoc-in req# [:query-params query-param#] access-token#)
-            (add-auth-header req# ~auth-key access-token#))
-          true]
-         [req# false]))))
+(defn- make-handler
+  [header-name]
+  (fn [request {:keys [access-token query-param] :as oauth2}]
+    (if access-token
+      [(if query-param
+         (assoc-in request [:query-params query-param] access-token)
+         (add-auth-header request header-name access-token))
+       true]
+      [request false])))
 
-(defaddtoken "bearer" "Bearer")
+(defmethod add-access-token-to-request "bearer"
+  [request oauth2]
+  ((make-handler "Bearer") request oauth2))
 
-(defaddtoken "draft-10" "OAuth") ; Force.com
+(defmethod add-access-token-to-request "draft-10"
+  [request oauth2]
+  ((make-handler "Oauth") request oauth2))
 
-(defaddtoken "token" "token")    ; Github
+(defmethod add-access-token-to-request "token"
+  [request oauth2]
+  ((make-handler "token") request oauth2))
 
 (defn wrap-oauth2 [client]
   (fn [req]
