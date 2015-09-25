@@ -1,10 +1,11 @@
 (ns clj-oauth2.client
   (:refer-clojure :exclude [get])
-  (:use [clj-http.client :only [wrap-request]]
-        [clojure.data.json :only [read-json]])
   (:require [clj-http.client :as http]
             [clojure.string :as str]
-            [uri.core :as uri])
+            [uri.core :as uri]
+            [ring.util.response :as resp]
+            [clj-http.client :refer [wrap-request]]
+            [cheshire.core :as json])
   (:import [clj_oauth2 OAuth2Exception OAuth2StateMismatchException]
            [org.apache.commons.codec.binary Base64]))
 
@@ -12,18 +13,15 @@
   [{:keys [authorization-uri client-id redirect-uri scope access-type]}
    & [state]]
   (let [uri (uri/uri->map (uri/make authorization-uri) true)
-        query (assoc (:query uri)
-                :client_id client-id
-                :redirect_uri redirect-uri
-                :response_type "code")
-        query (if state (assoc query :state state) query)
-        query (if access-type (assoc query :access_type access-type) query)
-        query (if scope
-                (assoc query :scope (str/join " " scope))
-                query)]
+        query (cond-> (assoc (:query uri)
+                             :client_id client-id
+                             :redirect_uri redirect-uri
+                             :response_type "code")
+                state       (assoc :state state)
+                access-type (assoc :access_type access-type)
+                scope       (assoc :scope (str/join " " scope)))]
     {:uri (str (uri/make (assoc uri :query query)))
-     :scope scope
-     :state state}))
+     :scope scope :state state}))
 
 (defn- add-auth-header [req scheme param] ; Force.com
   (let [header (str scheme " " param)]
@@ -36,52 +34,48 @@
   (fn [request endpoint params]
     (name (:grant-type endpoint))))
 
-(defmethod prepare-access-token-request
-  "authorization_code" [request endpoint params]
+(defmethod prepare-access-token-request "authorization_code"
+  [request endpoint params]
   (merge-with merge request
               {:body {:code
                       (:code params)
                       :redirect_uri
                       (:redirect-uri endpoint)}}))
 
-(defmethod prepare-access-token-request
-  "password" [request endpoint params]
+(defmethod prepare-access-token-request "password"
+  [request endpoint params]
   (merge-with merge request
-              {:body {:username (:username params)
-                      :password (:password params)}}))
+              {:body (select-keys params [:username :password])}))
 
 (defn- add-client-authentication [request endpoint]
   (let [{:keys [client-id client-secret authorization-header?]} endpoint]
     (if authorization-header?
-      (add-base64-auth-header
-       request
-       "Basic"
-       (str client-id ":" client-secret))
-      (merge-with
-       merge
-       request
-       {:body
-        {:client_id client-id
-         :client_secret client-secret}}))))
+      (add-base64-auth-header request "Basic" (str client-id ":" client-secret))
+      (merge-with merge request {:body
+                                 {:client_id client-id
+                                  :client_secret client-secret}}))))
+
+(defn- decode-response
+  [{:keys [headers body] :as response}]
+  (let [content-type (resp/get-header response "content-type")]
+    (if (and content-type
+             (or (.startsWith content-type "application/json")
+                 (.startsWith content-type "text/javascript"))) ; Facebookism
+      (json/parse-string body true)
+      (uri/form-url-decode body)))) ;; Facebookism
 
 (defn- request-access-token
   [endpoint params]
   (let [{:keys [access-token-uri access-query-param grant-type]} endpoint
-        request
-        {:content-type "application/x-www-form-urlencoded"
-         :throw-exceptions false
-         :body {:grant_type grant-type}}
-        request (prepare-access-token-request request endpoint params)
-        request (add-client-authentication request endpoint)
-        request (update-in request [:body] uri/form-url-encode)
-        {:keys [body headers status]} (http/post access-token-uri request)
-        content-type (headers "content-type")
-        body (if (and content-type
-                      (or (.startsWith content-type "application/json")
-                          (.startsWith content-type "text/javascript"))) ; Facebookism
-               (read-json body)
-               (uri/form-url-decode body)) ; Facebookism
-        error (:error body)]
+        request (-> {:content-type "application/x-www-form-urlencoded"
+                     :throw-exceptions false
+                     :body {:grant_type grant-type}}
+                    (prepare-access-token-request endpoint params)
+                    (add-client-authentication endpoint)
+                    (update-in [:body] uri/form-url-encode))
+        
+        {:keys [status body] :as response} (http/post access-token-uri request)
+        {error :error :as body} (decode-response response)]
     (if (or error (not= status 200))
       (throw (OAuth2Exception. (if error
                                  (if (string? error)
@@ -130,24 +124,27 @@
       (throw (OAuth2Exception. (str "Unknown token type: " token-type)))
       [req false])))
 
-(defmacro defaddtoken
-  [token-type-dispatch auth-key]
-  `(defmethod add-access-token-to-request
-     ~token-type-dispatch [req# oauth2#]
-     (let [access-token# (:access-token oauth2#)
-           query-param#  (:query-param oauth2#)]
-       (if access-token#
-         [(if query-param#
-            (assoc-in req# [:query-params query-param#] access-token#)
-            (add-auth-header req# ~auth-key access-token#))
-          true]
-         [req# false]))))
+(defn- make-handler
+  [header-name]
+  (fn [request {:keys [access-token query-param] :as oauth2}]
+    (if access-token
+      [(if query-param
+         (assoc-in request [:query-params query-param] access-token)
+         (add-auth-header request header-name access-token))
+       true]
+      [request false])))
 
-(defaddtoken "bearer" "Bearer")
+(defmethod add-access-token-to-request "bearer"
+  [request oauth2]
+  ((make-handler "Bearer") request oauth2))
 
-(defaddtoken "draft-10" "OAuth") ; Force.com
+(defmethod add-access-token-to-request "draft-10"
+  [request oauth2]
+  ((make-handler "Oauth") request oauth2))
 
-(defaddtoken "token" "token")    ; Github
+(defmethod add-access-token-to-request "token"
+  [request oauth2]
+  ((make-handler "token") request oauth2))
 
 (defn wrap-oauth2 [client]
   (fn [req]
@@ -168,7 +165,7 @@
                                           :refresh_token refresh-token
                                           :grant_type "refresh_token"}})]
     (when (= (:status req) 200)
-      (read-json (:body req)))))
+      (json/parse-string (:body req) true))))
 
 (def request
   (wrap-oauth2 http/request))
