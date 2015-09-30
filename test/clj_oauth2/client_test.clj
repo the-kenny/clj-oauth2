@@ -158,8 +158,13 @@
       [:head "/head"]
       (handle-protected-resource req "head"))))
 
-(defonce server
-  (future (ring/run-jetty handler {:port 18080})))
+(defn server
+  [tests]
+  (let [server (ring/run-jetty handler {:port 18080 :join? false})]
+    (tests)
+    (.stop server)))
+
+(use-fixtures :once server)
 
 (deftest grant-type-auth-code
   (let [req (base/make-auth-request endpoint-auth-code "bazqux")
