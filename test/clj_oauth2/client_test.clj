@@ -96,9 +96,7 @@
 ;; shamelessly copied from clj-http tests
 (defn handler [req]
   
-  (let [req (assoc req :query-params ;; update
-                   (and (:query-string req)
-                        (uri/form-url-decode (:query-string req))))]
+  (let [req (assoc req :query-params (some-> req :query-string uri/form-url-decode))]
     (condp = [(:request-method req) (:uri req)]
       [:post "/token-auth-code"]
       (let [{body :body :as req} (update req :body (comp uri/form-url-decode slurp))]
