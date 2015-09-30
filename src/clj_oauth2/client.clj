@@ -72,7 +72,7 @@
                      :body {:grant_type grant-type}}
                     (prepare-access-token-request endpoint params)
                     (add-client-authentication endpoint)
-                    (update-in [:body] uri/form-url-encode))
+                    (update :body uri/form-url-encode))
         
         {:keys [status body] :as response} (http/post access-token-uri request)
         {error :error :as body} (decode-response response)]
@@ -94,12 +94,11 @@
        :refresh-token (:refresh_token body)})))
 
 (defn get-access-token
-  [endpoint
-   & [params {expected-state :state expected-scope :scope}]]
+  [endpoint & [params {expected-state :state expected-scope :scope}]]
   (let [{:keys [state error]} params]
     (cond (string? error)
           (throw (OAuth2Exception. (:error_description params) error))
-          (and expected-state (not (= state expected-state)))
+          (and expected-state (not= state expected-state))
           (throw (OAuth2StateMismatchException.
                   (format "Expected state %s but got %s"
                           state expected-state)
