@@ -1,4 +1,4 @@
-(defproject clj-oauth2 "0.4.0-SNAPSHOT"
+(defproject clj-oauth2 "0.5.0"
   :description "clj-http and ring middlewares for OAuth 2.0"
   :dependencies [[org.clojure/clojure "1.7.0"]
                  [cheshire "5.5.0"]
